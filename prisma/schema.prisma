@@ -1,0 +1,382 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum ContentStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+}
+
+enum UserRole {
+  ADMIN
+  EDITOR
+  AUTHOR
+}
+
+enum AffiliateNetwork {
+  AMAZON
+  IMPACT
+  CJ
+  SHAREASALE
+  DIRECT
+  OTHER
+}
+
+// ============================================================
+// USERS & AUTH
+// ============================================================
+
+// Mirrors Supabase Auth users for role/permission lookups.
+// id matches the Supabase auth.users id (uuid), not autoincrement.
+model User {
+  id        String   @id @db.Uuid
+  email     String   @unique
+  role      UserRole @default(AUTHOR)
+  authorId  String?  @unique @db.Uuid
+  author    Author?  @relation(fields: [authorId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+// Public-facing author profile — separate from User because
+// an Author can exist as a byline without necessarily having login access.
+model Author {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  slug         String   @unique
+  bio          String?
+  avatarUrl    String?
+  twitterUrl   String?
+  linkedinUrl  String?
+  websiteUrl   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User?
+  articles     Article[]
+  reviews      Review[]
+  comparisons  Comparison[]
+
+  @@map("authors")
+}
+
+// ============================================================
+// TAXONOMY
+// ============================================================
+
+model Category {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  slug        String   @unique
+  description String?
+  seoTitle    String?
+  seoDescription String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  articles    Article[]
+  reviews     Review[]
+  comparisons Comparison[]
+
+  @@index([slug])
+  @@map("categories")
+}
+
+model Tag {
+  id        String      @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String      @unique
+  createdAt DateTime    @default(now())
+
+  articles  ArticleTag[]
+
+  @@index([slug])
+  @@map("tags")
+}
+
+// Explicit join model (rather than implicit many-to-many) so we can
+// extend it later (e.g., tag ordering, primary tag) without a migration headache.
+model ArticleTag {
+  articleId String  @db.Uuid
+  tagId     String  @db.Uuid
+  article   Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([articleId, tagId])
+  @@map("article_tags")
+}
+
+// ============================================================
+// MEDIA
+// ============================================================
+
+model Media {
+  id           String   @id @default(uuid()) @db.Uuid
+  url          String   // Supabase Storage public URL
+  storagePath  String   // path within the Supabase bucket, for deletion/management
+  altText      String?
+  width        Int?
+  height       Int?
+  sizeBytes    Int?
+  mimeType     String?
+  createdAt    DateTime @default(now())
+
+  articlesAsFeatured    Article[]    @relation("ArticleFeaturedImage")
+  reviewsAsFeatured     Review[]     @relation("ReviewFeaturedImage")
+  comparisonsAsFeatured Comparison[] @relation("ComparisonFeaturedImage")
+
+  @@map("media")
+}
+
+// ============================================================
+// ARTICLE (standard editorial content)
+// ============================================================
+
+model Article {
+  id              String        @id @default(uuid()) @db.Uuid
+  title           String
+  slug            String        @unique
+  excerpt         String?
+  content         String        // markdown or rich text JSON, decided at editor build time
+
+  featuredImageId String?       @db.Uuid
+  featuredImage   Media?        @relation("ArticleFeaturedImage", fields: [featuredImageId], references: [id])
+
+  authorId        String        @db.Uuid
+  author          Author        @relation(fields: [authorId], references: [id])
+
+  categoryId      String        @db.Uuid
+  category        Category      @relation(fields: [categoryId], references: [id])
+
+  tags            ArticleTag[]
+
+  status          ContentStatus @default(DRAFT)
+  publishedAt     DateTime?
+  scheduledFor    DateTime?
+
+  readingTime     Int?          // minutes, computed on save
+
+  featured        Boolean       @default(false)
+  pinned          Boolean       @default(false)
+
+  // SEO
+  seoTitle        String?
+  seoDescription  String?
+  canonicalUrl    String?
+  noIndex         Boolean       @default(false)
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  affiliateLinks  AffiliateLink[]
+
+  @@index([status, publishedAt])
+  @@index([categoryId])
+  @@index([authorId])
+  @@index([slug])
+  @@map("articles")
+}
+
+// ============================================================
+// PRODUCT (referenced by Review, Comparison, AffiliateLink)
+// ============================================================
+
+model Product {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  slug         String   @unique
+  description  String?
+  brand        String?
+  websiteUrl   String?
+  logoUrl      String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  reviews          Review[]
+  affiliateLinks   AffiliateLink[]
+  comparisonItems  ComparisonItem[]
+  aiTool           AiTool?
+
+  @@index([slug])
+  @@map("products")
+}
+
+// Extension of Product for AI-tool-specific structured data
+// (kept separate so Product stays generic for phones/software/etc.)
+model AiTool {
+  id            String   @id @default(uuid()) @db.Uuid
+  productId     String   @unique @db.Uuid
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  pricingModel  String?  // e.g., "Freemium", "Subscription", "One-time"
+  startingPrice String?
+  useCases      String[] // e.g., ["writing", "coding", "research"]
+  platforms     String[] // e.g., ["Web", "iOS", "Android", "Chrome Extension"]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("ai_tools")
+}
+
+// ============================================================
+// REVIEW (standalone content type)
+// ============================================================
+
+model Review {
+  id              String        @id @default(uuid()) @db.Uuid
+  title           String
+  slug            String        @unique
+  excerpt         String?
+  content         String
+
+  productId       String        @db.Uuid
+  product         Product       @relation(fields: [productId], references: [id])
+
+  rating          Decimal       @db.Decimal(2, 1) // e.g., 4.2
+  pros            String[]
+  cons            String[]
+  verdict         String?
+
+  featuredImageId String?       @db.Uuid
+  featuredImage   Media?        @relation("ReviewFeaturedImage", fields: [featuredImageId], references: [id])
+
+  authorId        String        @db.Uuid
+  author          Author        @relation(fields: [authorId], references: [id])
+
+  categoryId      String        @db.Uuid
+  category        Category      @relation(fields: [categoryId], references: [id])
+
+  status          ContentStatus @default(DRAFT)
+  publishedAt     DateTime?
+  scheduledFor    DateTime?
+
+  readingTime     Int?
+  featured        Boolean       @default(false)
+
+  seoTitle        String?
+  seoDescription  String?
+  canonicalUrl    String?
+  noIndex         Boolean       @default(false)
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  affiliateLinks  AffiliateLink[]
+
+  @@index([status, publishedAt])
+  @@index([categoryId])
+  @@index([productId])
+  @@index([slug])
+  @@map("reviews")
+}
+
+// ============================================================
+// COMPARISON (standalone content type)
+// ============================================================
+
+model Comparison {
+  id              String            @id @default(uuid()) @db.Uuid
+  title           String
+  slug            String            @unique
+  excerpt         String?
+  content         String
+
+  items           ComparisonItem[]  // the products being compared
+  winnerProductId String?           @db.Uuid // optional "best overall" pick
+
+  featuredImageId String?           @db.Uuid
+  featuredImage   Media?            @relation("ComparisonFeaturedImage", fields: [featuredImageId], references: [id])
+
+  authorId        String            @db.Uuid
+  author          Author            @relation(fields: [authorId], references: [id])
+
+  categoryId      String            @db.Uuid
+  category        Category          @relation(fields: [categoryId], references: [id])
+
+  status          ContentStatus     @default(DRAFT)
+  publishedAt     DateTime?
+  scheduledFor    DateTime?
+
+  readingTime     Int?
+  featured        Boolean           @default(false)
+
+  seoTitle        String?
+  seoDescription  String?
+  canonicalUrl    String?
+  noIndex         Boolean           @default(false)
+
+  createdAt       DateTime          @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  affiliateLinks  AffiliateLink[]
+
+  @@index([status, publishedAt])
+  @@index([categoryId])
+  @@index([slug])
+  @@map("comparisons")
+}
+
+// Join model holding per-product comparison data (the table rows),
+// e.g., price/rating/notes specific to this product WITHIN this comparison.
+model ComparisonItem {
+  id           String     @id @default(uuid()) @db.Uuid
+  comparisonId String     @db.Uuid
+  comparison   Comparison @relation(fields: [comparisonId], references: [id], onDelete: Cascade)
+
+  productId    String     @db.Uuid
+  product      Product    @relation(fields: [productId], references: [id])
+
+  position     Int        // display order in the comparison table
+  priceNote    String?    // e.g., "$10/mo" — freeform since pricing varies by product type
+  ratingNote   Decimal?   @db.Decimal(2, 1)
+  highlights   String[]   // short bullet points specific to this product in this comparison
+
+  @@unique([comparisonId, productId])
+  @@index([comparisonId])
+  @@map("comparison_items")
+}
+
+// ============================================================
+// AFFILIATE LINK
+// ============================================================
+
+model AffiliateLink {
+  id           String            @id @default(uuid()) @db.Uuid
+  productId    String            @db.Uuid
+  product      Product           @relation(fields: [productId], references: [id])
+
+  network      AffiliateNetwork  @default(OTHER)
+  url          String            // the actual affiliate tracking URL
+  label        String?           // e.g., "Get 20% off"
+  isActive     Boolean           @default(true)
+
+  articleId    String?           @db.Uuid
+  article      Article?          @relation(fields: [articleId], references: [id])
+
+  reviewId     String?           @db.Uuid
+  review       Review?           @relation(fields: [reviewId], references: [id])
+
+  comparisonId String?           @db.Uuid
+  comparison   Comparison?       @relation(fields: [comparisonId], references: [id])
+
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([productId])
+  @@map("affiliate_links")
+}
